@@ -8,6 +8,11 @@ from .IntuneCDBase import IntuneCDBase
 class ProcessAuditData(IntuneCDBase):
     """A class used to process the audit data from Intune."""
 
+    def __init__(self, *args, **kwargs):
+        """Initialize ProcessAuditData with git repo cache."""
+        super().__init__(*args, **kwargs)
+        self._git_repo_cache = {}  # Cache git repo check results by path
+
     def _git_installed(self):
         """
         Checks if git is installed.
@@ -70,10 +75,20 @@ class ProcessAuditData(IntuneCDBase):
     def _check_if_git_repo(self, path, file):
         """
         Checks if the path is a git repo.
+        Results are cached to avoid repeated subprocess calls.
 
         :param path: The path to check.
         :param file: The file to check.
         """
+        # Check cache first
+        if path in self._git_repo_cache:
+            self.log(
+                function="_check_if_git_repo",
+                msg=f"Using cached result for path {path}: {self._git_repo_cache[path]}",
+            )
+            return self._git_repo_cache[path]
+        
+        # Cache miss - perform the actual check
         cmd = ["git", "-C", path, "rev-parse", "--is-inside-work-tree"]
         self.log(
             function="_check_if_git_repo",
@@ -87,10 +102,14 @@ class ProcessAuditData(IntuneCDBase):
 
         if git_status.stdout.strip() == "true":
             self.log(function="_check_if_git_repo", msg="Path is a git repo.")
-            return True
-
-        self.log(function="_check_if_git_repo", msg="Path is not a git repo.")
-        return False
+            result = True
+        else:
+            self.log(function="_check_if_git_repo", msg="Path is not a git repo.")
+            result = False
+        
+        # Cache the result for future calls
+        self._git_repo_cache[path] = result
+        return result
 
     def _git_check_modified(self, path, file):
         """
