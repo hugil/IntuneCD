@@ -10,6 +10,7 @@ class ProcessScopeTags(BaseGraphModule):
         token: str = None,
     ):
         """Initializes the ProcessScopeTags class"""
+        super().__init__()
         self.token = token
 
     def get_scope_tags(self):

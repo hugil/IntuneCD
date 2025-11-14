@@ -40,6 +40,7 @@ class BaseUpdateModule(BaseGraphModule):
             remove (bool, optional): If the data should be removed, defaults to False.
             azure_token (str, optional): The Azure token to use, defaults to None.
         """
+        super().__init__()
         self.endpoint = "https://graph.microsoft.com"
         # Variables set from the update run
         self.token = token
