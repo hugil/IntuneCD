@@ -226,7 +226,9 @@ class BaseGraphModule(IntuneCDBase):
         """
         query_data = {"requests": []}
         for b_id in batch:
-            body = {"id": batch_id, "method": method, "url": url + b_id + extra_url}
+            # Extract the id from the dict if it's a dict, otherwise use it directly
+            id_value = b_id["id"] if isinstance(b_id, dict) else b_id
+            body = {"id": str(batch_id), "method": method, "url": url + "/" + id_value + extra_url}
             batch_id += 1
             query_data["requests"].append(body)
 
