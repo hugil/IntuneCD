@@ -4,6 +4,7 @@ import json
 import os
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from uuid import uuid4
 
 import requests
@@ -14,6 +15,19 @@ from .IntuneCDBase import IntuneCDBase
 
 class BaseGraphModule(IntuneCDBase):
     """Base class for the Graph API, used to make requests to the Microsoft Graph API."""
+
+    def __init__(self, *args, **kwargs):
+        """Initialize the BaseGraphModule with a connection-pooled session."""
+        super().__init__(*args, **kwargs)
+        # Create a session with connection pooling for better performance
+        self._session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=20,
+            max_retries=0,  # We handle retries manually
+        )
+        self._session.mount("https://", adapter)
+        self._session.mount("http://", adapter)
 
     def make_graph_request(
         self,
@@ -47,7 +61,8 @@ class BaseGraphModule(IntuneCDBase):
         while retry_count < max_retries:
             response = None  # Ensure response is defined even on exception
             try:
-                response = requests.request(
+                # Use session for connection pooling
+                response = self._session.request(
                     method=method,
                     url=endpoint,
                     headers=headers,
@@ -414,17 +429,39 @@ class BaseGraphModule(IntuneCDBase):
         initial_request_data = []
 
         batch_list = self.create_batch_list(data, batch_count)
-        for batch in batch_list:
-            batch_id, responses, retry_pool, wait_time = self.process_batch(
-                batch,
-                batch_id,
-                method,
-                url,
-                extra_url,
-                initial_request_data,
-                responses,
-                retry_pool,
-            )
+        
+        # Process batches in parallel with controlled concurrency
+        max_concurrent_batches = int(os.getenv("MAX_CONCURRENT_BATCHES", "3"))
+        
+        with ThreadPoolExecutor(max_workers=max_concurrent_batches) as executor:
+            # Submit all batch processing tasks
+            future_to_batch = {
+                executor.submit(
+                    self.process_batch,
+                    batch,
+                    i + 1,  # batch_id
+                    method,
+                    url,
+                    extra_url,
+                    initial_request_data,
+                    [],  # Start with empty responses for each thread
+                    [],  # Start with empty retry_pool for each thread
+                ): (i, batch)
+                for i, batch in enumerate(batch_list)
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_batch):
+                try:
+                    batch_id, batch_responses, batch_retry_pool, wait_time = future.result()
+                    responses.extend(batch_responses)
+                    retry_pool.extend(batch_retry_pool)
+                except Exception as e:
+                    batch_idx, batch = future_to_batch[future]
+                    self.log(
+                        tag="error",
+                        msg=f"Error processing batch {batch_idx + 1}: {e}"
+                    )
 
         max_retries = 10
         max_wait_time = 60

@@ -48,17 +48,41 @@ class AppConfigurationBackupModule(BaseBackupModule):
             return None
 
         if self.graph_data["value"]:
-            item = ""
+            # Collect all unique app IDs across all configurations
+            app_ids = set()
             for item in self.graph_data["value"]:
                 for app in item["targetedMobileApps"]:
-                    app_data = self.make_graph_request(
-                        endpoint=self.endpoint + self.APP_ENDPOINT + "/" + app
-                    )
-                    if app_data:
-                        item.pop("targetedMobileApps")
-                        item["targetedMobileApps"] = {}
-                        item["targetedMobileApps"]["appName"] = app_data["displayName"]
-                        item["targetedMobileApps"]["type"] = app_data["@odata.type"]
+                    app_ids.add(app)
+            
+            # Batch fetch all app details at once
+            app_details_map = {}
+            if app_ids:
+                app_list = [{"id": app_id} for app_id in app_ids]
+                app_responses = self.batch_request(
+                    data=app_list,
+                    url="/beta/deviceAppManagement/mobileApps",
+                    extra_url="",
+                    method="GET"
+                )
+                # Build a map of app_id -> app_data for quick lookup
+                for response in app_responses:
+                    if response.get("body"):
+                        app_data = response["body"]
+                        app_details_map[app_data["id"]] = app_data
+            
+            # Now process each configuration with the pre-fetched app details
+            for item in self.graph_data["value"]:
+                if item.get("targetedMobileApps"):
+                    # Get the first app (assuming single app per config based on original logic)
+                    for app in item["targetedMobileApps"]:
+                        app_data = app_details_map.get(app)
+                        if app_data:
+                            item.pop("targetedMobileApps")
+                            item["targetedMobileApps"] = {}
+                            item["targetedMobileApps"]["appName"] = app_data["displayName"]
+                            item["targetedMobileApps"]["type"] = app_data["@odata.type"]
+                            break  # Only process first app as per original logic
+                
                 if item.get("payloadJson"):
                     item["payloadJson"] = self.decode_base64(item["payloadJson"])
                     item["payloadJson"] = json.loads(item["payloadJson"])

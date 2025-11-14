@@ -72,42 +72,105 @@ class RolesBackupModule(BaseBackupModule):
             )
             return None
 
-        for item in self.graph_data["value"]:
-            if "assignments" not in self.exclude:
-                assignments = self.make_graph_request(
-                    self.endpoint
-                    + self.CONFIG_ENDPOINT
-                    + f"/{item['id']}/roleAssignments"
+        if "assignments" not in self.exclude:
+            # Stage 1: Batch fetch all role assignments
+            role_ids = [{"id": item["id"]} for item in self.graph_data["value"]]
+            
+            assignments_map = {}
+            if role_ids:
+                assignment_responses = self.batch_request(
+                    data=role_ids,
+                    url="/beta/deviceManagement/roleDefinitions",
+                    extra_url="/roleAssignments",
+                    method="GET"
                 )
-
-                if assignments["value"]:
+                
+                # Build map of role_id -> assignments
+                for response in assignment_responses:
+                    if response.get("body") and response["body"].get("value"):
+                        role_id = response.get("id", "").split("/")[-2] if "/" in response.get("id", "") else None
+                        if role_id:
+                            assignments_map[role_id] = response["body"]["value"]
+            
+            # Stage 2: Collect all assignment IDs and batch fetch their details
+            assignment_ids = []
+            role_assignment_mapping = {}  # Map assignment_id -> role_id
+            
+            for item in self.graph_data["value"]:
+                assignments = assignments_map.get(item["id"], [])
+                for assignment in assignments:
+                    assignment_ids.append({"id": assignment["id"]})
+                    role_assignment_mapping[assignment["id"]] = item["id"]
+            
+            assignment_details_map = {}
+            if assignment_ids:
+                assignment_detail_responses = self.batch_request(
+                    data=assignment_ids,
+                    url="/beta/deviceManagement/roleAssignments",
+                    extra_url="",
+                    method="GET"
+                )
+                
+                for response in assignment_detail_responses:
+                    if response.get("body"):
+                        assignment_data = response["body"]
+                        assignment_details_map[assignment_data["id"]] = assignment_data
+            
+            # Stage 3: Collect all group IDs (scopeMembers and members)
+            group_ids = set()
+            for assignment_data in assignment_details_map.values():
+                if assignment_data.get("scopeMembers"):
+                    group_ids.update(assignment_data["scopeMembers"])
+                if assignment_data.get("members"):
+                    group_ids.update(assignment_data["members"])
+            
+            # Stage 4: Batch fetch all group names
+            group_names_map = {}
+            if group_ids:
+                group_list = [{"id": group_id} for group_id in group_ids]
+                group_responses = self.batch_request(
+                    data=group_list,
+                    url="/beta/groups",
+                    extra_url="?$select=displayName",
+                    method="GET"
+                )
+                
+                for response in group_responses:
+                    if response.get("body"):
+                        group_data = response["body"]
+                        group_names_map[group_data["id"]] = group_data["displayName"]
+            
+            # Stage 5: Assemble the data
+            for item in self.graph_data["value"]:
+                assignments = assignments_map.get(item["id"], [])
+                
+                if assignments:
                     item["roleAssignments"] = []
-                    for assignment in assignments["value"]:
-                        role_assignment = self.make_graph_request(
-                            f"{self.endpoint}/beta/deviceManagement/roleAssignments/{assignment['id']}",
-                        )
+                    for assignment in assignments:
+                        assignment_detail = assignment_details_map.get(assignment["id"])
+                        if assignment_detail:
+                            self.remove_keys(assignment_detail)
+                            
+                            # Replace group IDs with names
+                            if assignment_detail.get("scopeMembers"):
+                                assignment_detail["scopeMembers"] = [
+                                    group_names_map.get(group_id, group_id)
+                                    for group_id in assignment_detail["scopeMembers"]
+                                ]
+                            
+                            if assignment_detail.get("members"):
+                                assignment_detail["members"] = [
+                                    group_names_map.get(group_id, group_id)
+                                    for group_id in assignment_detail["members"]
+                                ]
+                            
+                            # Remove resourceScopes
+                            assignment_detail.pop("resourceScopes", None)
+                            
+                            item["roleAssignments"].append(assignment_detail)
 
-                        item["roleAssignments"].append(role_assignment)
-
-                    # Get the scopeMembers and resourceScopes ids
-                    scope_member_names = ""
-                    member_names = ""
-                    for assignment in item["roleAssignments"]:
-                        self.remove_keys(assignment)
-                        if assignment.get("scopeMembers"):
-                            scope_member_names = self._get_group_names(
-                                assignment["scopeMembers"]
-                            )
-
-                        if scope_member_names:
-                            assignment["scopeMembers"] = scope_member_names
-                        assignment.pop("resourceScopes", None)
-
-                        if assignment.get("members"):
-                            member_names = self._get_group_names(assignment["members"])
-
-                        assignment["members"] = member_names
-
+        # Clean up role data
+        for item in self.graph_data["value"]:
             item.pop("permissions", None)
             item["rolePermissions"][0].pop("actions", None)
 

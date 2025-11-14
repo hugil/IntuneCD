@@ -135,42 +135,95 @@ class DeviceComplianceBackupModule(BaseBackupModule):
             )
             return None
 
+        # Collect all detection script IDs and notification template IDs upfront
+        detection_script_ids = set()
+        notification_template_ids = set()
+        scheduled_actions_ids = []
+        
         for item in self.graph_data["value"]:
-            # Is the policy a Linux discovery script?
+            # Collect detection script IDs for Linux policies
             if self._check_linux_discovery_script(item):
-                # Get the detection script ID
                 detection_script_id_path = self._get_detection_script_id(item)
                 if detection_script_id_path is not None:
                     detection_script_id = self._get_value_from_path(
                         item, detection_script_id_path
                     )
-                    # get the script name
-                    detection_script = self.make_graph_request(
-                        endpoint=self.endpoint
-                        + "/beta/deviceManagement/reusablePolicySettings/",
-                        params={"$filter": f"id eq '{detection_script_id}'"},
-                    )
-                    if detection_script["value"]:
-                        item["detectionScriptName"] = detection_script["value"][0][
-                            "displayName"
-                        ]
-                    else:
-                        item["detectionScriptName"] = None
+                    detection_script_ids.add(detection_script_id)
+            
+            # Collect policy IDs for scheduled actions
+            scheduled_actions_ids.append({"id": item["id"]})
 
-            # get scheduledActionsForRule
-            scheduledActionsForRule = self.make_graph_request(
-                endpoint=f"{self.endpoint + self.CONFIG_ENDPOINT}/{item['id']}/scheduledActionsForRule",
-                params={"$expand": "scheduledActionConfigurations"},
+        # Batch fetch all detection scripts
+        detection_scripts_map = {}
+        if detection_script_ids:
+            for script_id in detection_script_ids:
+                detection_script = self.make_graph_request(
+                    endpoint=self.endpoint
+                    + "/beta/deviceManagement/reusablePolicySettings/",
+                    params={"$filter": f"id eq '{script_id}'"},
+                )
+                if detection_script.get("value"):
+                    detection_scripts_map[script_id] = detection_script["value"][0]["displayName"]
+        
+        # Batch fetch all scheduled actions
+        scheduled_actions_responses = self.batch_request(
+            data=scheduled_actions_ids,
+            url="/beta/deviceManagement/compliancePolicies",
+            extra_url="/scheduledActionsForRule?$expand=scheduledActionConfigurations",
+            method="GET"
+        )
+        
+        scheduled_actions_map = {}
+        for response in scheduled_actions_responses:
+            if response.get("body") and response["body"].get("value"):
+                # Extract policy ID from the response
+                policy_id = response.get("id", "").split("/")[-2] if "/" in response.get("id", "") else None
+                if policy_id:
+                    scheduled_actions_map[policy_id] = response["body"]["value"]
+                    # Collect notification template IDs from scheduled actions
+                    for action in response["body"]["value"]:
+                        for config in action.get("scheduledActionConfigurations", []):
+                            template_id = config.get("notificationTemplateId")
+                            if template_id and template_id != "00000000-0000-0000-0000-000000000000":
+                                notification_template_ids.add(template_id)
+        
+        # Batch fetch all notification templates
+        notification_templates_map = {}
+        if notification_template_ids:
+            template_list = [{"id": template_id} for template_id in notification_template_ids]
+            template_responses = self.batch_request(
+                data=template_list,
+                url="/beta/deviceManagement/notificationMessageTemplates",
+                extra_url="",
+                method="GET"
             )
-            item["scheduledActionsForRule"] = scheduledActionsForRule["value"]
+            for response in template_responses:
+                if response.get("body"):
+                    template_data = response["body"]
+                    notification_templates_map[template_data["id"]] = template_data["displayName"]
 
-            for action in item["scheduledActionsForRule"]:
+        # Now process each item with the pre-fetched data
+        for item in self.graph_data["value"]:
+            # Add detection script name if Linux policy
+            if self._check_linux_discovery_script(item):
+                detection_script_id_path = self._get_detection_script_id(item)
+                if detection_script_id_path is not None:
+                    detection_script_id = self._get_value_from_path(
+                        item, detection_script_id_path
+                    )
+                    item["detectionScriptName"] = detection_scripts_map.get(detection_script_id)
+
+            # Add scheduled actions from the batch response
+            item["scheduledActionsForRule"] = scheduled_actions_map.get(item["id"], [])
+
+            # Add notification template names
+            for action in item.get("scheduledActionsForRule", []):
                 self.remove_keys(action)
-                self._get_notification_template(action)
-            for config in item["scheduledActionsForRule"][0][
-                "scheduledActionConfigurations"
-            ]:
-                self.remove_keys(config)
+                for config in action.get("scheduledActionConfigurations", []):
+                    template_id = config.get("notificationTemplateId")
+                    if template_id and template_id != "00000000-0000-0000-0000-000000000000":
+                        config["notificationTemplateName"] = notification_templates_map.get(template_id)
+                    self.remove_keys(config)
 
         try:
             self.results = self.process_data(

@@ -43,22 +43,72 @@ class GroupPolicyConfigurationsBackupModule(BaseBackupModule):
             )
             return None
 
+        # Stage 1: Batch fetch all definition values for all policies
+        definition_requests = []
         for item in self.graph_data["value"]:
-            definition_endpoint = f"{self.endpoint}{self.CONFIG_ENDPOINT}/{item['id']}/definitionValues?$expand=definition"
-            # Get definitions
-            definitions = self.make_graph_request(endpoint=definition_endpoint)
+            definition_requests.append({"id": item["id"]})
+        
+        definitions_map = {}
+        if definition_requests:
+            definition_responses = self.batch_request(
+                data=definition_requests,
+                url="/beta/deviceManagement/groupPolicyConfigurations",
+                extra_url="/definitionValues?$expand=definition",
+                method="GET"
+            )
+            
+            # Build map of policy_id -> definitions
+            for response in definition_responses:
+                if response.get("body") and response["body"].get("value"):
+                    # Extract policy ID from response
+                    policy_id = response.get("id", "").split("/")[-2] if "/" in response.get("id", "") else None
+                    if policy_id:
+                        definitions_map[policy_id] = response["body"]["value"]
 
-            if definitions:
-                item["definitionValues"] = definitions["value"]
-                for definition in item["definitionValues"]:
-                    presentation_endpoint = (
-                        f"{self.endpoint}{self.CONFIG_ENDPOINT}/{item['id']}/definitionValues/{definition['id']}/"
-                        f"presentationValues?$expand=presentation"
-                    )
-                    presentation = self.make_graph_request(
-                        endpoint=presentation_endpoint
-                    )
-                    definition["presentationValues"] = presentation["value"]
+        # Stage 2: Collect all presentation requests and batch fetch them
+        presentation_requests = []
+        policy_definition_map = {}  # Map to track which presentation belongs to which policy/definition
+        
+        for item in self.graph_data["value"]:
+            policy_id = item["id"]
+            definitions = definitions_map.get(policy_id, [])
+            
+            for definition in definitions:
+                presentation_requests.append({
+                    "id": f"{policy_id}/definitionValues/{definition['id']}"
+                })
+                # Store mapping for later reconstruction
+                key = f"{policy_id}/definitionValues/{definition['id']}"
+                policy_definition_map[key] = (policy_id, definition["id"])
+        
+        presentations_map = {}
+        if presentation_requests:
+            presentation_responses = self.batch_request(
+                data=presentation_requests,
+                url="/beta/deviceManagement/groupPolicyConfigurations",
+                extra_url="/presentationValues?$expand=presentation",
+                method="GET"
+            )
+            
+            # Build map of policy_id/definition_id -> presentations
+            for response in presentation_responses:
+                if response.get("body") and response["body"].get("value"):
+                    # Extract the composite key from response ID
+                    response_id = response.get("id", "")
+                    # Parse the ID to get policy and definition IDs
+                    if "/presentationValues" in response_id:
+                        key = response_id.split("/presentationValues")[0]
+                        presentations_map[key] = response["body"]["value"]
+
+        # Stage 3: Assemble the data structure
+        for item in self.graph_data["value"]:
+            policy_id = item["id"]
+            definitions = definitions_map.get(policy_id, [])
+            item["definitionValues"] = definitions
+            
+            for definition in item["definitionValues"]:
+                key = f"{policy_id}/definitionValues/{definition['id']}"
+                definition["presentationValues"] = presentations_map.get(key, [])
 
         try:
             self.results = self.process_data(
